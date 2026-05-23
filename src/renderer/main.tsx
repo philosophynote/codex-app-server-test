@@ -23,6 +23,201 @@ const createMessage = (role: ChatMessage["role"], text: string): ChatMessage => 
   status: "done",
 });
 
+const isMarkdownBlockStart = (line: string): boolean =>
+  /^#{1,6}\s+/.test(line) ||
+  /^```/.test(line) ||
+  /^>\s?/.test(line) ||
+  /^([-*+])\s+/.test(line) ||
+  /^\d+\.\s+/.test(line) ||
+  /^-{3,}\s*$/.test(line) ||
+  isTableStart(line);
+
+const isTableStart = (line: string): boolean => line.includes("|");
+
+const renderInlineMarkdown = (text: string): React.ReactNode[] => {
+  const elements: React.ReactNode[] = [];
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      elements.push(text.slice(lastIndex, match.index));
+    }
+
+    const token = match[0];
+    const key = `${match.index}-${token}`;
+
+    if (token.startsWith("`")) {
+      elements.push(<code key={key}>{token.slice(1, -1)}</code>);
+    } else if (token.startsWith("**")) {
+      elements.push(<strong key={key}>{renderInlineMarkdown(token.slice(2, -2))}</strong>);
+    } else if (token.startsWith("*")) {
+      elements.push(<em key={key}>{renderInlineMarkdown(token.slice(1, -1))}</em>);
+    } else {
+      const linkMatch = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
+      if (linkMatch !== null) {
+        elements.push(
+          <a href={linkMatch[2]} key={key} rel="noreferrer" target="_blank">
+            {renderInlineMarkdown(linkMatch[1])}
+          </a>,
+        );
+      }
+    }
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    elements.push(text.slice(lastIndex));
+  }
+
+  return elements;
+};
+
+const renderMarkdown = (text: string): React.ReactNode => {
+  if (text.length === 0) {
+    return <p>...</p>;
+  }
+
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks: React.ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+
+    if (line.trim().length === 0) {
+      index += 1;
+      continue;
+    }
+
+    const fenceMatch = /^```(\S*)\s*$/.exec(line);
+    if (fenceMatch !== null) {
+      const codeLines: string[] = [];
+      index += 1;
+
+      while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+
+      if (index < lines.length) {
+        index += 1;
+      }
+
+      blocks.push(
+        <pre className="markdown-code-block" key={`code-${index}`}>
+          {fenceMatch[1] ? <span>{fenceMatch[1]}</span> : null}
+          <code>{codeLines.join("\n")}</code>
+        </pre>,
+      );
+      continue;
+    }
+
+    const headingMatch = /^(#{1,6})\s+(.+)$/.exec(line);
+    if (headingMatch !== null) {
+      const HeadingTag = `h${Math.min(headingMatch[1].length, 4)}` as keyof React.JSX.IntrinsicElements;
+      blocks.push(<HeadingTag key={`heading-${index}`}>{renderInlineMarkdown(headingMatch[2])}</HeadingTag>);
+      index += 1;
+      continue;
+    }
+
+    if (/^-{3,}\s*$/.test(line)) {
+      blocks.push(<hr key={`hr-${index}`} />);
+      index += 1;
+      continue;
+    }
+
+    if (line.includes("|") && index + 1 < lines.length && /^\s*\|?[\s:-]+\|[\s|:-]+\s*$/.test(lines[index + 1])) {
+      const header = line;
+      const rows: string[] = [];
+      index += 2;
+
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim().length > 0) {
+        rows.push(lines[index]);
+        index += 1;
+      }
+
+      const splitRow = (row: string): string[] =>
+        row
+          .replace(/^\|/, "")
+          .replace(/\|$/, "")
+          .split("|")
+          .map((cell) => cell.trim());
+
+      blocks.push(
+        <div className="markdown-table-wrap" key={`table-${index}`}>
+          <table>
+            <thead>
+              <tr>
+                {splitRow(header).map((cell, cellIndex) => (
+                  <th key={`head-${cellIndex}`}>{renderInlineMarkdown(cell)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`row-${rowIndex}`}>
+                  {splitRow(row).map((cell, cellIndex) => (
+                    <td key={`cell-${rowIndex}-${cellIndex}`}>{renderInlineMarkdown(cell)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    if (/^>\s?/.test(line)) {
+      const quoteLines: string[] = [];
+
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ""));
+        index += 1;
+      }
+
+      blocks.push(<blockquote key={`quote-${index}`}>{renderMarkdown(quoteLines.join("\n"))}</blockquote>);
+      continue;
+    }
+
+    if (/^([-*+])\s+/.test(line) || /^\d+\.\s+/.test(line)) {
+      const ordered = /^\d+\.\s+/.test(line);
+      const items: string[] = [];
+      const itemPattern = ordered ? /^\d+\.\s+/ : /^[-*+]\s+/;
+
+      while (index < lines.length && itemPattern.test(lines[index])) {
+        items.push(lines[index].replace(itemPattern, ""));
+        index += 1;
+      }
+
+      const ListTag = ordered ? "ol" : "ul";
+      blocks.push(
+        <ListTag key={`list-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`item-${itemIndex}`}>{renderInlineMarkdown(item)}</li>
+          ))}
+        </ListTag>,
+      );
+      continue;
+    }
+
+    const paragraphLines: string[] = [line];
+    index += 1;
+
+    while (index < lines.length && lines[index].trim().length > 0 && !isMarkdownBlockStart(lines[index])) {
+      paragraphLines.push(lines[index]);
+      index += 1;
+    }
+
+    blocks.push(<p key={`paragraph-${index}`}>{renderInlineMarkdown(paragraphLines.join("\n"))}</p>);
+  }
+
+  return blocks;
+};
+
 const App = (): React.JSX.Element => {
   const [status, setStatus] = useState<CodexRuntimeStatus>(initialStatus);
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -181,7 +376,7 @@ const App = (): React.JSX.Element => {
                 <span>{message.role === "assistant" ? "Codex" : message.role === "user" ? "お兄ちゃん" : "System"}</span>
                 {message.status === "streaming" ? <small>入力中</small> : null}
               </div>
-              <p>{message.text || "..."}</p>
+              <div className="markdown-content">{renderMarkdown(message.text)}</div>
             </article>
           ))}
           <div ref={messagesEndRef} />
