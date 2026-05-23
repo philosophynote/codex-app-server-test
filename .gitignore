@@ -31,3 +31,5 @@ pnpm-debug.log*
 
 # Codex / Serena のローカル作業メタデータ
 .serena/
+
+output/
